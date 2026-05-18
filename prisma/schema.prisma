@@ -1,0 +1,46 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model User {
+  id           String   @id // matches Supabase user.id
+  name         String
+  email        String   @unique
+  xpPoints     Int      @default(0)
+  co2Saved     Float    @default(0.0)
+  scanCredits  Int      @default(10)
+  marketCredits Int     @default(5)
+  createdAt    DateTime @default(now())
+  
+  scans        Scan[]
+  listings     Listing[]
+}
+
+model Scan {
+  id          String   @id @default(uuid())
+  type        String
+  binCategory String
+  xpReward    Int
+  co2Saved    Float
+  createdAt   DateTime @default(now())
+  
+  userId      String
+  user        User     @relation(fields: [userId], references: [id])
+}
+
+model Listing {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  price       Float
+  category    String   @default("Other")
+  image       String   @default("")
+  createdAt   DateTime @default(now())
+  
+  sellerId    String
+  seller      User     @relation(fields: [sellerId], references: [id])
+}
