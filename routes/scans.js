@@ -44,6 +44,50 @@ const NON_WASTE_LABELS = new Set([
   'garbage'
 ]);
 
+const LABEL_KEYS = [
+  'class',
+  'class_name',
+  'className',
+  'label',
+  'name',
+  'prediction',
+  'predicted_class',
+  'top',
+  'top_class',
+  'detectedItem'
+];
+
+const CONFIDENCE_KEYS = [
+  'confidence',
+  'score',
+  'probability',
+  'value',
+  'percent',
+  'prediction_confidence'
+];
+
+const MAP_META_KEYS = new Set([
+  ...LABEL_KEYS.map((key) => key.toLowerCase()),
+  ...CONFIDENCE_KEYS.map((key) => key.toLowerCase()),
+  'x',
+  'y',
+  'width',
+  'height',
+  'bbox',
+  'bounding_box',
+  'points',
+  'class_id',
+  'detection_id',
+  'data',
+  'output',
+  'outputs',
+  'prediction_groups',
+  'predictions',
+  'result',
+  'results',
+  'top_prediction'
+]);
+
 function formatLabel(label) {
   return String(label)
     .replace(/[_-]+/g, ' ')
@@ -71,14 +115,27 @@ function getBinCategory(label) {
 function readConfidence(value) {
   if (typeof value === 'number') return value > 1 ? value / 100 : value;
   if (value && typeof value === 'object') {
-    return readConfidence(value.confidence ?? value.score ?? value.probability ?? value.value);
+    for (const key of CONFIDENCE_KEYS) {
+      const confidence = readConfidence(value[key]);
+      if (confidence > 0) return confidence;
+    }
   }
   return 0;
 }
 
 function readLabel(prediction) {
   if (!prediction || typeof prediction !== 'object') return null;
-  return prediction.class || prediction.label || prediction.predicted_class || prediction.top_class || prediction.name || null;
+
+  for (const key of LABEL_KEYS) {
+    const value = prediction[key];
+    if (typeof value === 'string' && value.trim()) return value;
+    if (value && typeof value === 'object') {
+      const nested = readLabel(value);
+      if (nested) return nested;
+    }
+  }
+
+  return null;
 }
 
 function isWastePrediction(prediction) {
@@ -88,11 +145,33 @@ function isWastePrediction(prediction) {
   const normalized = String(label).toLowerCase().trim();
   if (NON_WASTE_LABELS.has(normalized)) return false;
 
-  const confidence = readConfidence(prediction.confidence ?? prediction.score ?? prediction.probability ?? prediction.value);
+  const confidence = readConfidence(prediction);
   return confidence > 0.05; // Slightly higher threshold to filter noise
 }
 
-function extractPredictions(node, predictions = []) {
+function looksLikePredictionMap(node) {
+  if (!node || Array.isArray(node) || typeof node !== 'object') return false;
+
+  return Object.entries(node).some(([label, value]) => {
+    const normalizedLabel = String(label).toLowerCase().trim();
+    if (NON_WASTE_LABELS.has(normalizedLabel) || MAP_META_KEYS.has(normalizedLabel)) return false;
+    return typeof value === 'number' || readConfidence(value) > 0;
+  });
+}
+
+function extractPredictionMap(node, predictions) {
+  Object.entries(node).forEach(([label, value]) => {
+    const normalizedLabel = String(label).toLowerCase().trim();
+    if (NON_WASTE_LABELS.has(normalizedLabel) || MAP_META_KEYS.has(normalizedLabel)) return;
+
+    const confidence = readConfidence(value);
+    if (confidence > 0) {
+      predictions.push({ class: label, confidence });
+    }
+  });
+}
+
+function extractPredictions(node, predictions = [], seen = new Set()) {
   if (!node) return predictions;
 
   if (Array.isArray(node)) {
@@ -100,37 +179,50 @@ function extractPredictions(node, predictions = []) {
       if (isWastePrediction(item)) {
         predictions.push(item);
       } else {
-        extractPredictions(item, predictions);
+        extractPredictions(item, predictions, seen);
       }
     });
     return predictions;
   }
 
   if (typeof node !== 'object') return predictions;
+  if (seen.has(node)) return predictions;
+  seen.add(node);
 
   if (isWastePrediction(node)) {
     predictions.push(node);
   }
 
-  // Only recurse into specific keys that typically contain results
-  const resultKeys = ['predictions', 'outputs', 'top_prediction', 'results', 'data'];
-  for (const key of resultKeys) {
-    if (node[key]) {
-      if (typeof node[key] === 'object' && !Array.isArray(node[key])) {
-        // Handle dictionary of { label: confidence }
-        Object.entries(node[key]).forEach(([label, value]) => {
-          const conf = readConfidence(value);
-          if (conf > 0) {
-            predictions.push({ class: label, confidence: conf });
-          }
-        });
-      } else {
-        extractPredictions(node[key], predictions);
-      }
-    }
+  if (looksLikePredictionMap(node)) {
+    extractPredictionMap(node, predictions);
   }
 
+  Object.values(node).forEach((value) => {
+    if (value && typeof value === 'object') {
+      extractPredictions(value, predictions, seen);
+    }
+  });
+
   return predictions;
+}
+
+function dedupePredictions(predictions) {
+  const bestByLabel = new Map();
+
+  predictions.forEach((prediction) => {
+    const label = readLabel(prediction);
+    if (!label) return;
+
+    const key = label.toLowerCase().trim();
+    const confidence = readConfidence(prediction);
+    const current = bestByLabel.get(key);
+
+    if (!current || confidence > readConfidence(current)) {
+      bestByLabel.set(key, prediction);
+    }
+  });
+
+  return [...bestByLabel.values()];
 }
 
 function normalizePrediction(predictions) {
@@ -141,13 +233,13 @@ function normalizePrediction(predictions) {
   if (validPredictions.length === 0) return null;
 
   const topPrediction = [...validPredictions].sort((a, b) => {
-    const aScore = readConfidence(a.confidence ?? a.score ?? a.probability ?? a.value);
-    const bScore = readConfidence(b.confidence ?? b.score ?? b.probability ?? b.value);
+    const aScore = readConfidence(a);
+    const bScore = readConfidence(b);
     return bScore - aScore;
   })[0];
 
   const detectedItem = readLabel(topPrediction) || 'Unknown Item';
-  const confidence = readConfidence(topPrediction.confidence ?? topPrediction.score ?? topPrediction.probability ?? topPrediction.value);
+  const confidence = readConfidence(topPrediction);
   const materialCategory = getMaterialCategory(detectedItem);
   const label = materialCategory === 'Other' ? formatLabel(detectedItem) : materialCategory;
 
@@ -214,10 +306,11 @@ router.post('/identify', authenticateToken, async (req, res) => {
     }
 
     const roboflowResult = await queryRoboflow(imageBase64, imageUrl);
-    const predictions = extractPredictions(roboflowResult);
-    console.log('Roboflow predictions:', predictions.map((item) => ({
+    const predictions = dedupePredictions(extractPredictions(roboflowResult));
+    console.log('Roboflow prediction count:', predictions.length);
+    console.log('Roboflow predictions:', predictions.slice(0, 10).map((item) => ({
       label: readLabel(item),
-      confidence: readConfidence(item.confidence ?? item.score ?? item.probability ?? item.value)
+      confidence: readConfidence(item)
     })));
 
     const prediction = normalizePrediction(predictions);
