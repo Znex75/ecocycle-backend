@@ -7,17 +7,21 @@ datasource db {
 }
 
 model User {
-  id           String   @id // matches Supabase user.id
-  name         String
-  email        String   @unique
-  xpPoints     Int      @default(0)
-  co2Saved     Float    @default(0.0)
-  scanCredits  Int      @default(10)
-  marketCredits Int     @default(5)
-  createdAt    DateTime @default(now())
-  
-  scans        Scan[]
-  listings     Listing[]
+  id            String   @id // matches Supabase user.id
+  name          String
+  email         String   @unique
+  xpPoints      Int      @default(0)
+  co2Saved      Float    @default(0.0)
+  ecoCoins      Int      @default(100)
+  scanCredits   Int      @default(10)
+  marketCredits Int      @default(5)
+  createdAt     DateTime @default(now())
+
+  scans         Scan[]
+  listings      Listing[]       @relation("SellerListings")
+  purchases     Listing[]       @relation("BuyerListings")
+  sentTxns      Transaction[]   @relation("TxnFrom")
+  receivedTxns  Transaction[]   @relation("TxnTo")
 }
 
 model Scan {
@@ -27,7 +31,7 @@ model Scan {
   xpReward    Int
   co2Saved    Float
   createdAt   DateTime @default(now())
-  
+
   userId      String
   user        User     @relation(fields: [userId], references: [id])
 }
@@ -36,11 +40,31 @@ model Listing {
   id          String   @id @default(uuid())
   title       String
   description String
-  price       Float
+  price       Int      @default(1)
   category    String   @default("Other")
   image       String   @default("")
+  status      String   @default("active")
   createdAt   DateTime @default(now())
-  
+
   sellerId    String
-  seller      User     @relation(fields: [sellerId], references: [id])
+  seller      User     @relation("SellerListings", fields: [sellerId], references: [id])
+
+  buyerId     String?
+  buyer       User?    @relation("BuyerListings", fields: [buyerId], references: [id])
+}
+
+model Transaction {
+  id          String   @id @default(uuid())
+  type        String
+  amount      Int
+  description String
+  createdAt   DateTime @default(now())
+
+  fromUserId  String?
+  fromUser    User?    @relation("TxnFrom", fields: [fromUserId], references: [id])
+
+  toUserId    String?
+  toUser      User?    @relation("TxnTo", fields: [toUserId], references: [id])
+
+  listingId   String?
 }

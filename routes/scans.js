@@ -18,13 +18,13 @@ const WASTE_BIN_MAP = {
 };
 
 const MATERIAL_MATCHERS = [
-  { category: 'Plastic', keywords: ['plastic', 'bottle', 'pet', 'polyethylene', 'polypropylene'] },
-  { category: 'Glass', keywords: ['glass', 'jar'] },
-  { category: 'Paper', keywords: ['paper', 'cardboard', 'carton', 'book', 'newspaper'] },
-  { category: 'Metal', keywords: ['metal', 'aluminium', 'aluminum', 'steel', 'tin', 'can', 'copper', 'wire'] },
-  { category: 'Electronics', keywords: ['electronic', 'e-waste', 'battery', 'phone', 'keyboard', 'cable'] },
-  { category: 'Compost', keywords: ['compost', 'organic', 'food', 'leaf', 'leaves'] },
-  { category: 'Hazardous', keywords: ['hazard', 'chemical', 'paint', 'medical'] }
+  { category: 'Plastic', keywords: ['plastic', 'bottle', 'pet', 'polyethylene', 'polypropylene', 'hdpe', 'pvc', 'ldpe', 'ps', 'styrofoam'] },
+  { category: 'Glass', keywords: ['glass', 'jar', 'bottle', 'vial'] },
+  { category: 'Paper', keywords: ['paper', 'cardboard', 'carton', 'book', 'newspaper', 'magazine', 'envelope', 'folder'] },
+  { category: 'Metal', keywords: ['metal', 'aluminium', 'aluminum', 'steel', 'tin', 'can', 'copper', 'wire', 'brass', 'iron'] },
+  { category: 'Electronics', keywords: ['electronic', 'e-waste', 'battery', 'phone', 'keyboard', 'cable', 'computer', 'circuit'] },
+  { category: 'Compost', keywords: ['compost', 'organic', 'food', 'leaf', 'leaves', 'fruit', 'vegetable', 'peel', 'scraps'] },
+  { category: 'Hazardous', keywords: ['hazard', 'chemical', 'paint', 'medical', 'toxic', 'poison'] }
 ];
 
 const NON_WASTE_LABELS = new Set([
@@ -38,7 +38,10 @@ const NON_WASTE_LABELS = new Set([
   'background',
   'unknown',
   'none',
-  'null'
+  'null',
+  'waste',
+  'trash',
+  'garbage'
 ]);
 
 function formatLabel(label) {
@@ -50,6 +53,10 @@ function formatLabel(label) {
 
 function getMaterialCategory(label) {
   const normalized = String(label).toLowerCase();
+  // Try to find exact matches first, then keyword matches
+  for (const item of MATERIAL_MATCHERS) {
+    if (item.keywords.some(kw => normalized === kw)) return item.category;
+  }
   const match = MATERIAL_MATCHERS.find((item) =>
     item.keywords.some((keyword) => normalized.includes(keyword))
   );
@@ -81,14 +88,21 @@ function isWastePrediction(prediction) {
   const normalized = String(label).toLowerCase().trim();
   if (NON_WASTE_LABELS.has(normalized)) return false;
 
-  return readConfidence(prediction.confidence ?? prediction.score ?? prediction.probability ?? prediction.value) > 0;
+  const confidence = readConfidence(prediction.confidence ?? prediction.score ?? prediction.probability ?? prediction.value);
+  return confidence > 0.05; // Slightly higher threshold to filter noise
 }
 
 function extractPredictions(node, predictions = []) {
   if (!node) return predictions;
 
   if (Array.isArray(node)) {
-    node.forEach((item) => extractPredictions(item, predictions));
+    node.forEach((item) => {
+      if (isWastePrediction(item)) {
+        predictions.push(item);
+      } else {
+        extractPredictions(item, predictions);
+      }
+    });
     return predictions;
   }
 
@@ -98,26 +112,23 @@ function extractPredictions(node, predictions = []) {
     predictions.push(node);
   }
 
-  if (node.predictions && typeof node.predictions === 'object' && !Array.isArray(node.predictions)) {
-    Object.entries(node.predictions).forEach(([label, value]) => {
-      predictions.push({
-        class: label,
-        confidence: readConfidence(value)
-      });
-    });
+  // Only recurse into specific keys that typically contain results
+  const resultKeys = ['predictions', 'outputs', 'top_prediction', 'results', 'data'];
+  for (const key of resultKeys) {
+    if (node[key]) {
+      if (typeof node[key] === 'object' && !Array.isArray(node[key])) {
+        // Handle dictionary of { label: confidence }
+        Object.entries(node[key]).forEach(([label, value]) => {
+          const conf = readConfidence(value);
+          if (conf > 0) {
+            predictions.push({ class: label, confidence: conf });
+          }
+        });
+      } else {
+        extractPredictions(node[key], predictions);
+      }
+    }
   }
-
-  if (node.top_class) {
-    predictions.push({
-      class: node.top_class,
-      confidence: readConfidence(node.top_class_confidence ?? node.confidence ?? node.score ?? 0)
-    });
-  }
-
-  Object.entries(node).forEach(([key, value]) => {
-    if (key === 'inputs') return;
-    extractPredictions(value, predictions);
-  });
 
   return predictions;
 }
