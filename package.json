@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "start": "node server.js",
-    "build": "npx prisma generate"
+    "build": "npx prisma generate && npx prisma db push --accept-data-loss"
   },
   "keywords": [],
   "author": "",
