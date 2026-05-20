@@ -1,6 +1,15 @@
 require('dotenv').config();
+const ensureDatabaseSchema = require('./utils/ensureDatabaseSchema');
 const express = require('express');
 const cors = require('cors');
+
+try {
+  ensureDatabaseSchema();
+} catch (error) {
+  console.error('Database schema check failed:', error);
+  process.exit(1);
+}
+
 const userRoutes = require('./routes/user');
 
 const app = express();
