@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "start": "node server.js",
-    "build": "npx prisma generate && npx prisma db push --accept-data-loss"
+    "start": "prisma db push --accept-data-loss && node server.js",
+    "build": "prisma generate && prisma db push --accept-data-loss"
   },
   "keywords": [],
   "author": "",
@@ -18,9 +18,7 @@
     "axios": "^1.6.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
-    "express": "^5.2.1"
-  },
-  "devDependencies": {
+    "express": "^5.2.1",
     "prisma": "^7.8.0"
   }
 }
