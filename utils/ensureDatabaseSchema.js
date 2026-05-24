@@ -40,7 +40,7 @@ function ensureDatabaseSchema() {
       "xpPoints" INTEGER NOT NULL DEFAULT 0,
       "co2Saved" REAL NOT NULL DEFAULT 0.0,
       "ecoCoins" INTEGER NOT NULL DEFAULT 100,
-      "scanCredits" INTEGER NOT NULL DEFAULT 10,
+      "scanCredits" INTEGER NOT NULL DEFAULT 25,
       "marketCredits" INTEGER NOT NULL DEFAULT 5,
       "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -88,7 +88,7 @@ function ensureDatabaseSchema() {
   `);
 
   addColumnIfMissing(db, 'User', 'ecoCoins', '"ecoCoins" INTEGER NOT NULL DEFAULT 100');
-  addColumnIfMissing(db, 'User', 'scanCredits', '"scanCredits" INTEGER NOT NULL DEFAULT 10');
+  addColumnIfMissing(db, 'User', 'scanCredits', '"scanCredits" INTEGER NOT NULL DEFAULT 25');
   addColumnIfMissing(db, 'User', 'marketCredits', '"marketCredits" INTEGER NOT NULL DEFAULT 5');
   addColumnIfMissing(db, 'Listing', 'status', '"status" TEXT NOT NULL DEFAULT \'active\'');
   addColumnIfMissing(db, 'Listing', 'buyerId', '"buyerId" TEXT');

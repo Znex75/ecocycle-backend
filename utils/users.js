@@ -1,5 +1,7 @@
 const prisma = require('../prisma');
 
+const DEFAULT_FREE_SCAN_CREDITS = Number(process.env.DEFAULT_FREE_SCAN_CREDITS || 25);
+
 async function getOrCreateUser(authUser, profile = {}) {
   const email = profile.email || authUser.email || `${authUser.id}@ecocycle.local`;
   const name =
@@ -21,7 +23,8 @@ async function getOrCreateUser(authUser, profile = {}) {
       data: {
         id: authUser.id,
         name,
-        email
+        email,
+        scanCredits: DEFAULT_FREE_SCAN_CREDITS
       }
     });
   } catch (error) {

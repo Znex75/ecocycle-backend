@@ -13,7 +13,7 @@ model User {
   xpPoints      Int      @default(0)
   co2Saved      Float    @default(0.0)
   ecoCoins      Int      @default(100)
-  scanCredits   Int      @default(10)
+  scanCredits   Int      @default(25)
   marketCredits Int      @default(5)
   createdAt     DateTime @default(now())
 

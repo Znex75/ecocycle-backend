@@ -5,6 +5,14 @@ const prisma = require('../prisma');
 const axios = require('axios');
 const { getOrCreateUser } = require('../utils/users');
 
+const DEFAULT_FREE_SCAN_CREDITS = Number(process.env.DEFAULT_FREE_SCAN_CREDITS || 25);
+const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'sundijason@gmail.com')
+  .split(',')
+  .map((email) => email.trim().toLowerCase())
+  .filter(Boolean);
+const MIN_KNOWN_WASTE_CONFIDENCE = 0.08;
+const MIN_UNKNOWN_WASTE_CONFIDENCE = 0.18;
+
 const WASTE_BIN_MAP = {
   Plastic: 'Blue Bin',
   Glass: 'Green Bin',
@@ -18,13 +26,13 @@ const WASTE_BIN_MAP = {
 };
 
 const MATERIAL_MATCHERS = [
-  { category: 'Plastic', keywords: ['plastic', 'bottle', 'pet', 'polyethylene', 'polypropylene', 'hdpe', 'pvc', 'ldpe', 'ps', 'styrofoam'] },
-  { category: 'Glass', keywords: ['glass', 'jar', 'bottle', 'vial'] },
-  { category: 'Paper', keywords: ['paper', 'cardboard', 'carton', 'book', 'newspaper', 'magazine', 'envelope', 'folder'] },
-  { category: 'Metal', keywords: ['metal', 'aluminium', 'aluminum', 'steel', 'tin', 'can', 'copper', 'wire', 'brass', 'iron'] },
-  { category: 'Electronics', keywords: ['electronic', 'e-waste', 'battery', 'phone', 'keyboard', 'cable', 'computer', 'circuit'] },
-  { category: 'Compost', keywords: ['compost', 'organic', 'food', 'leaf', 'leaves', 'fruit', 'vegetable', 'peel', 'scraps'] },
-  { category: 'Hazardous', keywords: ['hazard', 'chemical', 'paint', 'medical', 'toxic', 'poison'] }
+  { category: 'Hazardous', keywords: ['hazardous', 'chemical', 'paint', 'paint can', 'medicine', 'medical waste', 'toxic', 'poison', 'pesticide', 'aerosol', 'sanitary pad', 'diaper'] },
+  { category: 'Electronics', keywords: ['electronic', 'electronics', 'e waste', 'ewaste', 'e-waste', 'battery', 'phone', 'mobile phone', 'keyboard', 'cable', 'charger', 'computer', 'laptop', 'circuit', 'remote', 'headphones'] },
+  { category: 'Compost', keywords: ['compost', 'organic', 'food waste', 'leftover food', 'leaf', 'leaves', 'fruit', 'vegetable', 'banana peel', 'orange peel', 'peel', 'scraps', 'eggshell', 'tea bag', 'coffee grounds'] },
+  { category: 'Glass', keywords: ['glass', 'glass bottle', 'glass jar', 'jar', 'vial'] },
+  { category: 'Paper', keywords: ['paper', 'cardboard', 'carton', 'paper cup', 'paper bag', 'book', 'newspaper', 'magazine', 'envelope', 'folder', 'box'] },
+  { category: 'Metal', keywords: ['metal', 'aluminium', 'aluminum', 'steel', 'tin can', 'soda can', 'metal can', 'food can', 'copper', 'wire', 'brass', 'iron', 'foil'] },
+  { category: 'Plastic', keywords: ['plastic', 'plastic bottle', 'water bottle', 'soda bottle', 'pet bottle', 'pet', 'polyethylene', 'polypropylene', 'hdpe', 'pvc', 'ldpe', 'polystyrene', 'styrofoam', 'wrapper', 'packet', 'sachet', 'plastic bag', 'plastic cup', 'straw', 'takeout container'] }
 ];
 
 const NON_WASTE_LABELS = new Set([
@@ -78,6 +86,7 @@ const MAP_META_KEYS = new Set([
   'points',
   'class_id',
   'detection_id',
+  'detection_class',
   'data',
   'output',
   'outputs',
@@ -88,6 +97,25 @@ const MAP_META_KEYS = new Set([
   'top_prediction'
 ]);
 
+function normalizeLabelText(label) {
+  return String(label || '')
+    .toLowerCase()
+    .replace(/[_-]+/g, ' ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function containsKeyword(normalizedText, keyword) {
+  const normalizedKeyword = normalizeLabelText(keyword);
+  if (!normalizedKeyword) return false;
+  return new RegExp(`(^|\\s)${escapeRegExp(normalizedKeyword)}(\\s|$)`).test(normalizedText);
+}
+
 function formatLabel(label) {
   return String(label)
     .replace(/[_-]+/g, ' ')
@@ -96,13 +124,22 @@ function formatLabel(label) {
 }
 
 function getMaterialCategory(label) {
-  const normalized = String(label).toLowerCase();
-  // Try to find exact matches first, then keyword matches
+  const normalized = normalizeLabelText(label);
+  if (!normalized) return 'Other';
+
+  const directCategory = MATERIAL_MATCHERS.find(
+    (item) => normalized === item.category.toLowerCase()
+  );
+  if (directCategory) return directCategory.category;
+
   for (const item of MATERIAL_MATCHERS) {
-    if (item.keywords.some(kw => normalized === kw)) return item.category;
+    if (item.keywords.some((keyword) => normalizeLabelText(keyword) === normalized)) {
+      return item.category;
+    }
   }
+
   const match = MATERIAL_MATCHERS.find((item) =>
-    item.keywords.some((keyword) => normalized.includes(keyword))
+    item.keywords.some((keyword) => containsKeyword(normalized, keyword))
   );
   return match?.category || 'Other';
 }
@@ -142,18 +179,24 @@ function isWastePrediction(prediction) {
   const label = readLabel(prediction);
   if (!label) return false;
 
-  const normalized = String(label).toLowerCase().trim();
+  const normalized = normalizeLabelText(label);
   if (NON_WASTE_LABELS.has(normalized)) return false;
 
   const confidence = readConfidence(prediction);
-  return confidence > 0.05; // Slightly higher threshold to filter noise
+  const materialCategory = getMaterialCategory(label);
+
+  if (materialCategory !== 'Other') {
+    return confidence >= MIN_KNOWN_WASTE_CONFIDENCE;
+  }
+
+  return confidence >= MIN_UNKNOWN_WASTE_CONFIDENCE;
 }
 
 function looksLikePredictionMap(node) {
   if (!node || Array.isArray(node) || typeof node !== 'object') return false;
 
   return Object.entries(node).some(([label, value]) => {
-    const normalizedLabel = String(label).toLowerCase().trim();
+    const normalizedLabel = normalizeLabelText(label);
     if (NON_WASTE_LABELS.has(normalizedLabel) || MAP_META_KEYS.has(normalizedLabel)) return false;
     return typeof value === 'number' || readConfidence(value) > 0;
   });
@@ -161,7 +204,7 @@ function looksLikePredictionMap(node) {
 
 function extractPredictionMap(node, predictions) {
   Object.entries(node).forEach(([label, value]) => {
-    const normalizedLabel = String(label).toLowerCase().trim();
+    const normalizedLabel = normalizeLabelText(label);
     if (NON_WASTE_LABELS.has(normalizedLabel) || MAP_META_KEYS.has(normalizedLabel)) return;
 
     const confidence = readConfidence(value);
@@ -213,7 +256,7 @@ function dedupePredictions(predictions) {
     const label = readLabel(prediction);
     if (!label) return;
 
-    const key = label.toLowerCase().trim();
+    const key = normalizeLabelText(label);
     const confidence = readConfidence(prediction);
     const current = bestByLabel.get(key);
 
@@ -241,7 +284,7 @@ function normalizePrediction(predictions) {
   const detectedItem = readLabel(topPrediction) || 'Unknown Item';
   const confidence = readConfidence(topPrediction);
   const materialCategory = getMaterialCategory(detectedItem);
-  const label = materialCategory === 'Other' ? formatLabel(detectedItem) : materialCategory;
+  const label = formatLabel(detectedItem);
 
   return {
     label,
@@ -250,6 +293,79 @@ function normalizePrediction(predictions) {
     materialCategory,
     binCategory: getBinCategory(detectedItem)
   };
+}
+
+function isAdminEmail(email) {
+  return ADMIN_EMAILS.includes(String(email || '').toLowerCase());
+}
+
+function isAdminBypassRequest(req) {
+  return req.get('x-ecocycle-admin') === 'true' &&
+    isAdminEmail(req.get('x-ecocycle-admin-email'));
+}
+
+function authenticateScanRequest(req, res, next) {
+  if (isAdminBypassRequest(req)) {
+    req.isAdmin = true;
+    req.user = {
+      id: `admin-${req.get('x-ecocycle-admin-email').toLowerCase()}`,
+      email: req.get('x-ecocycle-admin-email'),
+      user_metadata: { name: 'EcoCycle Admin' }
+    };
+    return next();
+  }
+
+  return authenticateToken(req, res, () => {
+    req.isAdmin = isAdminEmail(req.user?.email);
+    next();
+  });
+}
+
+function buildPaymentRequiredPayload(scanCredits = 0) {
+  return {
+    error: 'No scan credits left',
+    paymentRequired: true,
+    scanCredits,
+    freeScanLimit: DEFAULT_FREE_SCAN_CREDITS,
+    message: `You have used your free ${DEFAULT_FREE_SCAN_CREDITS} scans. Buy more scan credits to continue identifying waste items.`,
+    creditPacks: [
+      { quantity: 5, ecoCoins: 50 },
+      { quantity: 10, ecoCoins: 100 },
+      { quantity: 25, ecoCoins: 250 }
+    ],
+    paymentUrl: process.env.PAYMENT_BASE_URL
+      ? `${process.env.PAYMENT_BASE_URL}/checkout?type=scan&qty=10`
+      : null
+  };
+}
+
+function getDisposalRecommendation(prediction) {
+  const category = prediction.materialCategory;
+  const bin = prediction.binCategory;
+
+  if (category === 'Compost') {
+    return 'Compost this item if it is food or plant matter. Remove stickers, rubber bands, or plastic first.';
+  }
+  if (category === 'Hazardous') {
+    return 'Do not place this in regular bins. Use a hazardous waste drop-off point or local collection event.';
+  }
+  if (category === 'Electronics') {
+    return 'Take this to an e-waste collection point. Remove personal data and batteries where possible.';
+  }
+  if (category === 'Glass') {
+    return `Empty and rinse it, then place it in the ${bin}. Keep ceramics and bulbs separate.`;
+  }
+  if (category === 'Metal') {
+    return `Empty, rinse, and lightly crush if allowed, then place it in the ${bin}.`;
+  }
+  if (category === 'Paper') {
+    return `Keep it clean and dry before placing it in the ${bin}. Greasy paper should go to general waste or compost if accepted locally.`;
+  }
+  if (category === 'Plastic') {
+    return `Empty and rinse it, then place it in the ${bin}. Check local rules for films, wrappers, and mixed plastics.`;
+  }
+
+  return `Place this item in the ${bin}. Re-scan in better light if the category looks wrong.`;
 }
 
 async function queryRoboflow(imageBase64, imageUrl) {
@@ -284,7 +400,7 @@ async function queryRoboflow(imageBase64, imageUrl) {
   }
 }
 
-router.post('/identify', authenticateToken, async (req, res) => {
+router.post('/identify', authenticateScanRequest, async (req, res) => {
   const { imageBase64, imageUrl } = req.body;
 
   if (!imageBase64 && !imageUrl) {
@@ -293,16 +409,10 @@ router.post('/identify', authenticateToken, async (req, res) => {
 
   try {
     const user = await getOrCreateUser(req.user);
+    const isAdmin = req.isAdmin || isAdminEmail(user.email);
 
-    if (user.scanCredits <= 0) {
-      return res.status(402).json({
-        error: 'No scan credits left',
-        paymentRequired: true,
-        message: 'Buy more scan credits to continue identifying waste items.',
-        paymentUrl: process.env.PAYMENT_BASE_URL
-          ? `${process.env.PAYMENT_BASE_URL}/checkout?type=scan&qty=5`
-          : 'https://example.com/pay?type=scan&qty=5'
-      });
+    if (!isAdmin && user.scanCredits <= 0) {
+      return res.status(402).json(buildPaymentRequiredPayload(user.scanCredits));
     }
 
     const roboflowResult = await queryRoboflow(imageBase64, imageUrl);
@@ -342,10 +452,11 @@ router.post('/identify', authenticateToken, async (req, res) => {
         materialCategory: prediction.materialCategory,
         binCategory: prediction.binCategory,
         confidence: prediction.confidence,
-        sellable: prediction.confidence > 0.5,
+        sellable: ['Plastic', 'Glass', 'Paper', 'Metal', 'Electronics'].includes(prediction.materialCategory) &&
+          prediction.confidence > 0.45,
         xpReward,
         co2Saved,
-        recommendation: `Place this item in the ${prediction.binCategory}.`,
+        recommendation: getDisposalRecommendation(prediction),
         priceEstimate: `(estimate ${Math.max(1, Math.round(prediction.confidence * 10))} EcoCoins)`
       }
     });
@@ -355,7 +466,7 @@ router.post('/identify', authenticateToken, async (req, res) => {
   }
 });
 
-router.post('/', authenticateToken, async (req, res) => {
+router.post('/', authenticateScanRequest, async (req, res) => {
   const { type, binCategory, xpReward, co2Saved } = req.body;
 
   if (!type || !binCategory) {
@@ -364,15 +475,10 @@ router.post('/', authenticateToken, async (req, res) => {
 
   try {
     const user = await getOrCreateUser(req.user);
+    const isAdmin = req.isAdmin || isAdminEmail(user.email);
 
-    if (user.scanCredits <= 0) {
-      return res.status(402).json({
-        error: 'No scan credits left',
-        paymentRequired: true,
-        paymentUrl: process.env.PAYMENT_BASE_URL
-          ? `${process.env.PAYMENT_BASE_URL}/checkout?type=scan&qty=5`
-          : 'https://example.com/pay?type=scan&qty=5'
-      });
+    if (!isAdmin && user.scanCredits <= 0) {
+      return res.status(402).json(buildPaymentRequiredPayload(user.scanCredits));
     }
 
     const scan = await prisma.scan.create({
@@ -390,11 +496,18 @@ router.post('/', authenticateToken, async (req, res) => {
       data: {
         xpPoints: { increment: scan.xpReward },
         co2Saved: { increment: scan.co2Saved },
-        scanCredits: { decrement: 1 }
+        ...(isAdmin ? {} : { scanCredits: { decrement: 1 } })
       }
     });
 
-    res.json({ message: 'Scan logged successfully', scan, updatedUser });
+    res.json({
+      message: isAdmin
+        ? 'Admin scan logged successfully. Credits were not decremented.'
+        : 'Scan logged successfully',
+      adminUnlimited: isAdmin,
+      scan,
+      updatedUser
+    });
   } catch (error) {
     console.error('Error logging scan:', error);
     res.status(500).json({ error: 'Failed to log scan' });
