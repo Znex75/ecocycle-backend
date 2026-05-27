@@ -375,7 +375,7 @@ async function queryRoboflow(imageBase64, imageUrl) {
     throw new Error('Roboflow API configuration missing');
   }
 
-  const endpoint = 'https://serverless.roboflow.com/znexs-workspace/workflows/detect-and-classify-5';
+  const endpoint = 'https://serverless.roboflow.com/infer/workflows/znexs-workspace/detect-and-classify-5';
   const payload = {
     api_key: apiKey,
     inputs: {
