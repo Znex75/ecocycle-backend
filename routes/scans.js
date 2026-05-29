@@ -10,8 +10,8 @@ const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || 'sundijason@gmail.com')
   .split(',')
   .map((email) => email.trim().toLowerCase())
   .filter(Boolean);
-const MIN_KNOWN_WASTE_CONFIDENCE = 0.08;
-const MIN_UNKNOWN_WASTE_CONFIDENCE = 0.18;
+const MIN_KNOWN_WASTE_CONFIDENCE = 0.05;
+const MIN_UNKNOWN_WASTE_CONFIDENCE = 0.10;
 
 const WASTE_BIN_MAP = {
   Plastic: 'Blue Bin',
@@ -426,7 +426,36 @@ async function queryRoboflow(imageBase64, imageUrl) {
         'Content-Type': 'application/json'
       }
     });
-    return response.data;
+
+    const data = response.data;
+
+    // Check if workflow returned any classification results
+    const classificationPreds = extractClassificationPredictions(data);
+    if (classificationPreds.length > 0) {
+      return data;
+    }
+
+    // FALLBACK: call classification model directly on full image
+    console.log('No detections from workflow, trying direct classification...');
+    const fallbackResponse = await axios.post(
+      'https://serverless.roboflow.com/ai-powered-waste-management/1',
+      imageBase64
+        ? `data:image/jpeg;base64,${imageBase64}`
+        : imageUrl,
+      {
+        params: { api_key: apiKey },
+        timeout: 20000,
+        headers: { 'Content-Type': imageUrl ? 'application/x-www-form-urlencoded' : 'application/x-www-form-urlencoded' }
+      }
+    );
+
+    // Wrap fallback response in same structure
+    return {
+      classification_predictions: [
+        { predictions: { predictions: fallbackResponse.data?.predictions || [] } }
+      ]
+    };
+
   } catch (error) {
     const detail = error.response?.data?.error || error.response?.data?.message || error.message;
     throw new Error(`Roboflow call failed: ${error.response?.status || 'network'} ${detail}`);
