@@ -268,6 +268,39 @@ function dedupePredictions(predictions) {
   return [...bestByLabel.values()];
 }
 
+function extractClassificationPredictions(roboflowResult) {
+  const classificationPreds = roboflowResult?.[0]?.classification_predictions
+    || roboflowResult?.outputs?.[0]?.classification_predictions
+    || roboflowResult?.classification_predictions
+    || [];
+
+  const results = [];
+  const predList = Array.isArray(classificationPreds) ? classificationPreds : [classificationPreds];
+
+  for (const item of predList) {
+    const inner = item?.predictions || item;
+    const predsArray = inner?.predictions || [];
+
+    for (const pred of predsArray) {
+      if (pred?.class && typeof pred.confidence === 'number') {
+        results.push({ class: pred.class, confidence: pred.confidence });
+      }
+    }
+  }
+  
+  // Also check top level predictions if classification_predictions is empty
+  if (results.length === 0) {
+    const topPreds = roboflowResult?.[0]?.predictions?.predictions || roboflowResult?.predictions?.predictions || [];
+    for (const pred of topPreds) {
+      if (pred?.class && typeof pred.confidence === 'number') {
+        results.push({ class: pred.class, confidence: pred.confidence });
+      }
+    }
+  }
+
+  return results;
+}
+
 function normalizePrediction(predictions) {
   const validPredictions = Array.isArray(predictions)
     ? predictions.filter(isWastePrediction)
@@ -416,9 +449,18 @@ router.post('/identify', authenticateScanRequest, async (req, res) => {
     }
 
     const roboflowResult = await queryRoboflow(imageBase64, imageUrl);
-    const predictions = dedupePredictions(extractPredictions(roboflowResult));
-    console.log('Roboflow prediction count:', predictions.length);
-    console.log('Roboflow predictions:', predictions.slice(0, 10).map((item) => ({
+    
+    // Try classification predictions first (most accurate for our use case)
+    let predictions = extractClassificationPredictions(roboflowResult);
+    
+    if (predictions.length === 0) {
+      // Fall back to general extraction
+      predictions = dedupePredictions(extractPredictions(roboflowResult));
+    } else {
+      predictions = dedupePredictions(predictions);
+    }
+
+    console.log('Final predictions used:', predictions.map((item) => ({
       label: readLabel(item),
       confidence: readConfidence(item)
     })));
